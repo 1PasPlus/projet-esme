@@ -2,13 +2,12 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType, ArrayType
 from pyspark.sql.functions import (
-    col, from_json, from_unixtime, to_timestamp, expr, to_json, struct
+    col, from_json, from_unixtime, to_timestamp, expr, to_json, struct, lit, when
 )
 
 # ---------------------------------------------------------------------------
 # Étape 1 : Configuration de Spark
 # ---------------------------------------------------------------------------
-# TODO : Modifier "tp-esme" par le nom de votre répertoire GitHub ou chemin local
 os.environ["SPARK_HOME"] = "/workspaces/projet-esme/spark-3.2.3-bin-hadoop2.7"
 
 spark = SparkSession.builder \
@@ -46,7 +45,6 @@ weather_schema = StructType([
 # ---------------------------------------------------------------------------
 # Étape 3 : Lecture des données en streaming depuis Kafka
 # ---------------------------------------------------------------------------
-# TODO : Remplacer "tp-meteo" par le nom du topic que vous souhaitez utiliser
 df = (
     spark.readStream
     .format("kafka")
@@ -80,20 +78,23 @@ processed_df = parsed_df.select(
 # ---------------------------------------------------------------------------
 # Étape 5 : Création de nouvelles variables
 # ---------------------------------------------------------------------------
-
-# TODO : Ajouter une colonne "heat_index" avec la formule :
-# température + (0.5555 * ((6.11 * (10 ^ ((7.5 * température) / (237.7 + température))) * (humidité / 100)) - 10))
-
-# TODO : Ajouter une colonne "severity_index" avec la formule :
-# (vitesse du vent * 0.5) + ((1015 - pression) * 0.3) + (humidité * 0.2)
-
-# TODO : Ajouter une colonne "time_of_day" pour catégoriser la période de la journée :
-# Matin (6h-12h), Après-midi (12h-18h), Soirée (18h-24h), Nuit (0h-6h)
+processed_df = processed_df.withColumn(
+    "heat_index",
+    col("temperature") + (0.5555 * ((6.11 * (10 ** ((7.5 * col("temperature")) / (237.7 + col("temperature"))))) * (col("humidity") / 100)) - 10)
+).withColumn(
+    "severity_index",
+    (col("speed") * 0.5) + ((1015 - col("pressure")) * 0.3) + (col("humidity") * 0.2)
+).withColumn(
+    "time_of_day",
+    when((col("date").substr(12, 2).cast("int") >= 6) & (col("date").substr(12, 2).cast("int") < 12), lit("Matin"))
+    .when((col("date").substr(12, 2).cast("int") >= 12) & (col("date").substr(12, 2).cast("int") < 18), lit("Après-midi"))
+    .when((col("date").substr(12, 2).cast("int") >= 18) & (col("date").substr(12, 2).cast("int") < 24), lit("Soirée"))
+    .otherwise(lit("Nuit"))
+)
 
 # ---------------------------------------------------------------------------
 # Étape 6 : Transformation des données en JSON pour Kafka
 # ---------------------------------------------------------------------------
-# Todo: ajouter toutes les variables calculer
 kafka_output_df = processed_df.select(
     to_json(struct(
         col("date"),
@@ -105,14 +106,16 @@ kafka_output_df = processed_df.select(
         col("temperature"),
         col("pressure"),
         col("humidity"),
-        col("speed")
+        col("speed"),
+        col("heat_index"),
+        col("severity_index"),
+        col("time_of_day")
     )).alias("value")  # Convertir les données en JSON pour Kafka
 )
 
 # ---------------------------------------------------------------------------
 # Étape 7 : Écriture des résultats dans un topic Kafka
 # ---------------------------------------------------------------------------
-# TODO : Remplacer "tp-meteo-final" par le nom du topic Kafka où envoyer les données
 query = (kafka_output_df
     .writeStream
     .format("kafka")
